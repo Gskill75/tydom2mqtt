@@ -77,3 +77,21 @@ def test_hassio_mqtt_ssl_parsed_to_bool(monkeypatch, ssl_value, expected):
     monkeypatch.setattr("builtins.open", mock_open(read_data=payload))
     cfg.override_configuration_for_hassio()
     assert cfg.mqtt_ssl is expected
+
+
+@pytest.mark.parametrize(
+    "presets",
+    ['{"ECO": "17", "COMFORT": "20"}', {"ECO": "17", "COMFORT": "20"}],
+)
+def test_hassio_thermostat_custom_presets(monkeypatch, presets):
+    payload = json.dumps(
+        {
+            "TYDOM_MAC": "001A25",
+            "TYDOM_PASSWORD": "secret",
+            "THERMOSTAT_CUSTOM_PRESETS": presets,
+        }
+    )
+    cfg = Configuration()
+    monkeypatch.setattr("builtins.open", mock_open(read_data=payload))
+    cfg.override_configuration_for_hassio()
+    assert json.loads(cfg.thermostat_custom_presets) == {"ECO": "17", "COMFORT": "20"}

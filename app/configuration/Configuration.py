@@ -154,6 +154,16 @@ class Configuration:
                             THERMOSTAT_HEAT_MODE_TEMP_DEFAULT
                         ]
 
+                    if (
+                        THERMOSTAT_CUSTOM_PRESETS in data
+                        and data[THERMOSTAT_CUSTOM_PRESETS] != ""
+                    ):
+                        presets = data[THERMOSTAT_CUSTOM_PRESETS]
+                        # TydomClient expects a JSON string, as with the env var
+                        self.thermostat_custom_presets = (
+                            presets if isinstance(presets, str) else json.dumps(presets)
+                        )
+
                     if MQTT_HOST in data and data[MQTT_HOST] != "":
                         self.mqtt_host = data[MQTT_HOST]
 
