@@ -339,6 +339,7 @@ supported_usages = {
 device_name = dict()
 device_endpoint = dict()
 device_type = dict()
+device_parent_name = dict()
 reported_unsupported = set()
 reported_elements = set()
 
@@ -489,6 +490,10 @@ class MessageHandler:
             # usage is not handled below, so entities never fall back to ids.
             if i.get("name"):
                 device_name[device_unique_id] = i["name"]
+                # The main endpoint of a Tydom device shares its id; its name
+                # is the one of the parent equipment (e.g. a K-Line bay window)
+                if str(i["id_endpoint"]) == str(i["id_device"]):
+                    device_parent_name[str(i["id_device"])] = i["name"]
 
             if i["last_usage"] not in supported_usages:
                 if device_unique_id not in reported_unsupported:
@@ -942,6 +947,8 @@ class MessageHandler:
                             attr_ukn["id"] = str(device_id) + "_" + str(endpoint_id)
                             attr_ukn["name"] = print_id
                             attr_ukn["device_type"] = "sensor"
+                            # openState only exists on openings: expose it too
+                            attr_ukn["opening_class"] = "window"
                             attr_ukn["element_name"] = element_name
                             attr_ukn[element_name] = element_value
                             self._add_element(attr_ukn, element_name)
@@ -1249,6 +1256,18 @@ class MessageHandler:
 
     async def _publish_sensors(self, attributes):
         """Publish one sensor per collected element, plus the opening state."""
+        # A window / door detector that is a child endpoint of another Tydom
+        # device (e.g. the opening sensor of a K-Line bay with its shutter) is
+        # attached to the parent equipment instead of its own HA device
+        device_id = str(attributes.get("device_id"))
+        if (
+            "opening_class" in attributes
+            and str(attributes.get("endpoint_id")) != device_id
+            and device_id in device_parent_name
+        ):
+            attributes["parent_id"] = device_id + "_" + device_id
+            attributes["parent_name"] = device_parent_name[device_id]
+
         for element_name in attributes.get("elements", [attributes["element_name"]]):
             new_sensor = Sensor(
                 elem_name=element_name,

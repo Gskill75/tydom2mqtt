@@ -49,7 +49,12 @@ def _parse_window(last_usage, data, name="Fenetre Cuisine"):
 @pytest.fixture(autouse=True)
 def _clean_device_cache():
     yield
-    for cache in ("device_name", "device_type", "device_endpoint"):
+    for cache in (
+        "device_name",
+        "device_type",
+        "device_endpoint",
+        "device_parent_name",
+    ):
         getattr(message_handler_module, cache).clear()
 
 
@@ -73,6 +78,56 @@ def test_kline_window_publishes_every_element_and_opening():
     assert opening_config["device_class"] == "window"
     assert opening_config["device"]["name"] == "Fenetre Cuisine"
     assert published[f"binary_sensor/tydom/opening_tydom_{uid}/state"] == "ON"
+
+
+# K-Line: the opening detector is a child endpoint of the bay (parent device,
+# whose main endpoint is the shutter); it must join the parent HA device.
+def test_kline_child_detector_attached_to_parent_device():
+    mqtt = MagicMock()
+    handler = MessageHandler(b"", MagicMock(cmd_prefix=""), mqtt)
+    config = {
+        "endpoints": [
+            {
+                "id_endpoint": DEVICE_ID,
+                "id_device": DEVICE_ID,
+                "name": "Baie Salon",
+                "last_usage": "klineShutter",
+            },
+            {
+                "id_endpoint": 2,
+                "id_device": DEVICE_ID,
+                "name": "Detecteur",
+                "last_usage": "klineWindowSliding",
+            },
+        ]
+    }
+    endpoint = {
+        "id": 2,
+        "error": 0,
+        "data": [
+            {"name": "openState", "validity": "upToDate", "value": "LOCKED"},
+            {"name": "battDefect", "validity": "upToDate", "value": False},
+        ],
+    }
+    asyncio.run(handler.parse_config_data(config))
+    asyncio.run(handler.parse_endpoint_data(endpoint, DEVICE_ID))
+    published = _published(mqtt)
+
+    parent = f"{DEVICE_ID}_{DEVICE_ID}"
+    child = f"{DEVICE_ID}_2"
+    opening = json.loads(
+        published[f"homeassistant/binary_sensor/tydom/opening_tydom_{child}/config"]
+    )
+    batt = json.loads(
+        published[f"homeassistant/binary_sensor/tydom/battdefect_tydom_{child}/config"]
+    )
+    for config_payload in (opening, batt):
+        assert config_payload["device"]["identifiers"] == parent
+        assert config_payload["device"]["name"] == "Baie Salon"
+        assert "model" not in config_payload["device"]
+    # Named after its device class, next to the shutter (main feature)
+    assert "name" not in opening
+    assert opening["device_class"] == "window"
 
 
 def test_door_opening_uses_door_class():

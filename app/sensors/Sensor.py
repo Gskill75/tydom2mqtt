@@ -36,8 +36,16 @@ class Sensor:
 
         # extracted from json, but it will make sensor not in payload to be
         # considered offline....
-        self.parent_device_id = str(tydom_attributes_payload["id"])
-        self.parent_name = str(tydom_attributes_payload["name"])
+        # A child endpoint may be attached to its parent equipment's device
+        self.attached_to_parent = "parent_id" in tydom_attributes_payload
+        self.parent_device_id = str(
+            tydom_attributes_payload.get("parent_id", tydom_attributes_payload["id"])
+        )
+        self.parent_name = str(
+            tydom_attributes_payload.get(
+                "parent_name", tydom_attributes_payload["name"]
+            )
+        )
         self.id = elem_name + "_tydom_" + str(tydom_attributes_payload["id"])
         self.name = elem_name
         self.entity_category = None
@@ -160,9 +168,11 @@ class Sensor:
         self.device = {
             "manufacturer": "Delta Dore",
             "identifiers": self.parent_device_id,
-            "model": "Sensor",
             "name": self.parent_name,
         }
+        # Don't override the parent's model (e.g. "Volet")
+        if not self.attached_to_parent:
+            self.device["model"] = "Sensor"
 
         self.config_sensor_topic = sensor_config_topic.format(id=self.id)
 
