@@ -36,7 +36,7 @@ class Sensor:
 
         # extracted from json, but it will make sensor not in payload to be
         # considered offline....
-        # A child endpoint may be attached to its parent equipment's device
+        # An opening detector may be published on its window group's device
         self.attached_to_parent = "parent_id" in tydom_attributes_payload
         self.parent_device_id = str(
             tydom_attributes_payload.get("parent_id", tydom_attributes_payload["id"])
@@ -47,7 +47,9 @@ class Sensor:
             )
         )
         self.id = elem_name + "_tydom_" + str(tydom_attributes_payload["id"])
-        self.name = elem_name
+        # Several detectors share the window device: prefix with their name
+        member_name = tydom_attributes_payload.get("member_name")
+        self.name = f"{member_name} {elem_name}" if member_name else elem_name
         self.entity_category = None
 
         # Per-element metadata wins over the device-wide one, so a device
@@ -168,11 +170,9 @@ class Sensor:
         self.device = {
             "manufacturer": "Delta Dore",
             "identifiers": self.parent_device_id,
+            "model": "Window" if self.attached_to_parent else "Sensor",
             "name": self.parent_name,
         }
-        # Don't override the parent's model (e.g. "Volet")
-        if not self.attached_to_parent:
-            self.device["model"] = "Sensor"
 
         self.config_sensor_topic = sensor_config_topic.format(id=self.id)
 
