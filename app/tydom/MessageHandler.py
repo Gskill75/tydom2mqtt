@@ -10,6 +10,7 @@ from sensors.Boiler import Boiler
 from sensors.Cover import Cover
 from sensors.Garage import Garage
 from sensors.Light import Light
+from sensors.Opening import Opening
 from sensors.Sensor import Sensor
 from sensors.Switch import Switch
 from sensors.ShHvac import ShHvac
@@ -306,10 +307,40 @@ device_conso_keywords = device_conso_classes.keys()
 
 deviceSmokeKeywords = ["techSmokeDefect"]
 
+# Tydom `last_usage` values handled by parse_config_data
+supported_usages = {
+    "shutter",
+    "klineShutter",
+    "light",
+    "window",
+    "windowFrench",
+    "windowSliding",
+    "belmDoor",
+    "klineDoor",
+    "klineWindowFrench",
+    "klineWindowSliding",
+    "garage_door",
+    "gate",
+    "awning",
+    "garage_door_horizontal",
+    "others",
+    "sensorSun",
+    "sensorThermo",
+    "boiler",
+    "conso",
+    "sh_hvac",
+    "alarm",
+    "electric",
+    "sensorDFR",
+    "",
+}
+
 # Device dict for parsing
 device_name = dict()
 device_endpoint = dict()
 device_type = dict()
+reported_unsupported = set()
+reported_elements = set()
 
 
 class MessageHandler:
@@ -453,6 +484,22 @@ class MessageHandler:
     async def parse_config_data(parsed):
         for i in parsed["endpoints"]:
             device_unique_id = str(i["id_endpoint"]) + "_" + str(i["id_device"])
+
+            # Keep the Tydom-defined name for every endpoint, even when its
+            # usage is not handled below, so entities never fall back to ids.
+            if i.get("name"):
+                device_name[device_unique_id] = i["name"]
+
+            if i["last_usage"] not in supported_usages:
+                if device_unique_id not in reported_unsupported:
+                    reported_unsupported.add(device_unique_id)
+                    logger.info(
+                        "Unsupported device type (id=%s, name=%s, last_usage=%s)",
+                        device_unique_id,
+                        i.get("name"),
+                        i["last_usage"],
+                    )
+                continue
 
             if (
                 i["last_usage"] == "shutter"
@@ -671,8 +718,10 @@ class MessageHandler:
                             attr_door["door_name"] = print_id
                             attr_door["name"] = print_id
                             attr_door["device_type"] = "sensor"
+                            attr_door["opening_class"] = "door"
                             attr_door["element_name"] = element_name
                             attr_door[element_name] = element_value
+                            self._add_element(attr_door, element_name)
 
                     if type_of_id == "belmDoor" or type_of_id == "klineDoor":
                         if (
@@ -706,8 +755,12 @@ class MessageHandler:
                             attr_window["door_name"] = print_id
                             attr_window["name"] = print_id
                             attr_window["device_type"] = "sensor"
+                            attr_window["opening_class"] = "window"
                             attr_window["element_name"] = element_name
                             attr_window[element_name] = element_value
+                            self._add_element(attr_window, element_name)
+                        else:
+                            self._report_element(type_of_id, element_name)
 
                     if type_of_id == "sensorThermo" or type_of_id == "sensorSun":
                         if (
@@ -741,19 +794,26 @@ class MessageHandler:
                                 # Keep original value if conversion fails
                                 normalized_value = element_value
 
-                            # Home Assistant typing and units
+                            # Home Assistant typing and units, per element so
+                            # each published sensor gets its own class / unit
+                            element_meta = attr_sensor.setdefault("element_meta", {})
                             if element_name == "outTemperature":
                                 # Temperature in Celsius
-                                attr_sensor["device_class"] = "temperature"
-                                attr_sensor["state_class"] = "measurement"
-                                attr_sensor["unit_of_measurement"] = "°C"
+                                element_meta[element_name] = {
+                                    "device_class": "temperature",
+                                    "state_class": "measurement",
+                                    "unit_of_measurement": "°C",
+                                }
                             elif element_name == "lightPower":
                                 # Power in Watts
-                                attr_sensor["device_class"] = "power"
-                                attr_sensor["state_class"] = "measurement"
-                                attr_sensor["unit_of_measurement"] = "W"
+                                element_meta[element_name] = {
+                                    "device_class": "power",
+                                    "state_class": "measurement",
+                                    "unit_of_measurement": "W",
+                                }
 
                             attr_sensor[element_name] = normalized_value
+                            self._add_element(attr_sensor, element_name)
 
                     if type_of_id == "boiler":
                         if (
@@ -858,6 +918,7 @@ class MessageHandler:
                             attr_smoke["device_type"] = "sensor"
                             attr_smoke["element_name"] = element_name
                             attr_smoke[element_name] = element_value
+                            self._add_element(attr_smoke, element_name)
 
                     if type_of_id == "unknown":
                         if (
@@ -871,6 +932,7 @@ class MessageHandler:
                             attr_ukn["device_type"] = "sensor"
                             attr_ukn["element_name"] = element_name
                             attr_ukn[element_name] = element_value
+                            self._add_element(attr_ukn, element_name)
                         elif (
                             element_name in deviceDoorKeywords
                             and element_validity == "upToDate"
@@ -882,6 +944,7 @@ class MessageHandler:
                             attr_ukn["device_type"] = "sensor"
                             attr_ukn["element_name"] = element_name
                             attr_ukn[element_name] = element_value
+                            self._add_element(attr_ukn, element_name)
 
                     if type_of_id == "others":
                         if (
@@ -916,30 +979,15 @@ class MessageHandler:
                 new_garage = Garage(tydom_attributes=attr_garage, mqtt=self.mqtt_client)
                 await new_garage.update()
             elif "device_type" in attr_door and attr_door["device_type"] == "sensor":
-                new_door = Sensor(
-                    elem_name=attr_door["element_name"],
-                    tydom_attributes_payload=attr_door,
-                    mqtt=self.mqtt_client,
-                )
-                await new_door.update()
+                await self._publish_sensors(attr_door)
             elif (
                 "device_type" in attr_window and attr_window["device_type"] == "sensor"
             ):
-                new_window = Sensor(
-                    elem_name=attr_window["element_name"],
-                    tydom_attributes_payload=attr_window,
-                    mqtt=self.mqtt_client,
-                )
-                await new_window.update()
+                await self._publish_sensors(attr_window)
             elif (
                 "device_type" in attr_sensor and attr_sensor["device_type"] == "sensor"
             ):
-                new_sensor = Sensor(
-                    elem_name=attr_sensor["element_name"],
-                    tydom_attributes_payload=attr_sensor,
-                    mqtt=self.mqtt_client,
-                )
-                await new_sensor.update()
+                await self._publish_sensors(attr_sensor)
             elif "device_type" in attr_light and attr_light["device_type"] == "light":
                 new_light = Light(tydom_attributes=attr_light, mqtt=self.mqtt_client)
                 await new_light.update()
@@ -956,19 +1004,9 @@ class MessageHandler:
                 new_gate = Switch(tydom_attributes=attr_gate, mqtt=self.mqtt_client)
                 await new_gate.update()
             elif "device_type" in attr_smoke and attr_smoke["device_type"] == "sensor":
-                new_smoke = Sensor(
-                    elem_name=attr_smoke["element_name"],
-                    tydom_attributes_payload=attr_smoke,
-                    mqtt=self.mqtt_client,
-                )
-                await new_smoke.update()
+                await self._publish_sensors(attr_smoke)
             elif "device_type" in attr_ukn and attr_ukn["device_type"] == "sensor":
-                new_ukn = Sensor(
-                    elem_name=attr_ukn["element_name"],
-                    tydom_attributes_payload=attr_ukn,
-                    mqtt=self.mqtt_client,
-                )
-                await new_ukn.update()
+                await self._publish_sensors(attr_ukn)
             elif (
                 "device_type" in attr_sh_hvac
                 and attr_sh_hvac["device_type"] == "sh_hvac"
@@ -1192,6 +1230,36 @@ class MessageHandler:
     def put_response_from_bytes(data):
         request = HTTPRequest(data)
         return request
+
+    @staticmethod
+    def _add_element(attributes, element_name):
+        elements = attributes.setdefault("elements", [])
+        if element_name not in elements:
+            elements.append(element_name)
+
+    @staticmethod
+    def _report_element(device_usage, element_name):
+        # Log once each element a window / door sends but that is not handled,
+        # to help supporting new models (e.g. K-Line variants)
+        if (device_usage, element_name) not in reported_elements:
+            reported_elements.add((device_usage, element_name))
+            logger.info(
+                "Ignored element (type=%s, element=%s)", device_usage, element_name
+            )
+
+    async def _publish_sensors(self, attributes):
+        """Publish one sensor per collected element, plus the opening state."""
+        for element_name in attributes.get("elements", [attributes["element_name"]]):
+            new_sensor = Sensor(
+                elem_name=element_name,
+                tydom_attributes_payload=attributes,
+                mqtt=self.mqtt_client,
+            )
+            await new_sensor.update()
+
+        if "opening_class" in attributes and "openState" in attributes:
+            opening = Opening(tydom_attributes=attributes, mqtt=self.mqtt_client)
+            await opening.update()
 
     def get_type_from_id(self, id):
         device_type_detected = ""
