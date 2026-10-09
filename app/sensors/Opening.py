@@ -7,6 +7,9 @@ opening_state_topic = "binary_sensor/tydom/opening_tydom_{id}/state"
 
 # Tydom reports a window / door as closed only when its openState is LOCKED;
 # any other value (UNLOCKED, OPEN_FRENCH, OPEN_HOPPER, ...) means open.
+# K-Line detectors whose openState is LOCKED / UNLOCKED only report UNLOCKED
+# (with intrusionDetect true) as soon as the sash is opened, even slightly
+# (checked on a real installation).
 CLOSED_OPEN_STATE = "LOCKED"
 
 
