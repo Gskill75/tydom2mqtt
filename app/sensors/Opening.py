@@ -16,28 +16,36 @@ class Opening:
     def __init__(self, tydom_attributes, mqtt=None):
         self.attributes = tydom_attributes
         self.id = str(self.attributes["id"])
-        self.name = str(self.attributes["name"])
+        # A child detector may be attached to its parent equipment's device
+        self.attached_to_parent = "parent_id" in self.attributes
+        self.device_id = str(self.attributes.get("parent_id", self.id))
+        self.name = str(self.attributes.get("parent_name", self.attributes["name"]))
         self.device_class = self.attributes.get("opening_class", "window")
         self.open_state = self.attributes["openState"]
         self.mqtt = mqtt
         self.config = None
 
     async def setup(self):
+        device = {
+            "manufacturer": "Delta Dore",
+            "identifiers": self.device_id,
+            "name": self.name,
+        }
         self.config = {
-            # name None: the opening is the main feature of the window device
-            "name": None,
             "unique_id": "opening_tydom_" + self.id,
             "device_class": self.device_class,
             "state_topic": opening_state_topic.format(id=self.id),
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": {
-                "manufacturer": "Delta Dore",
-                "identifiers": self.id,
-                "model": "Sensor",
-                "name": self.name,
-            },
+            "device": device,
         }
+        # Attached to a parent equipment, no name is published: HA names it
+        # after its device class ("Window", translated) next to the parent's
+        # main entity (e.g. the K-Line shutter)
+        if not self.attached_to_parent:
+            # name None: the opening is the main feature of the window device
+            self.config["name"] = None
+            device["model"] = "Sensor"
 
         if self.mqtt is not None:
             self.mqtt.mqtt_client.publish(
