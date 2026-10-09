@@ -339,8 +339,22 @@ supported_usages = {
 device_name = dict()
 device_endpoint = dict()
 device_type = dict()
-device_parent_name = dict()
 reported_unsupported = set()
+
+# Tydom group usages describing a window / door made of opening detectors
+opening_usages = {
+    "window",
+    "windowFrench",
+    "windowSliding",
+    "klineWindowFrench",
+    "klineWindowSliding",
+    "belmDoor",
+    "klineDoor",
+}
+# group id -> name, for window / door groups (from /configs/file)
+opening_groups = dict()
+# "device_endpoint" -> [group id, ...] (from /groups/file)
+endpoint_groups = dict()
 reported_elements = set()
 
 
@@ -428,6 +442,8 @@ class MessageHandler:
         if data != "":
             if "id_catalog" in data:
                 msg_type = "msg_config"
+            elif '"groups"' in first:
+                msg_type = "msg_groups"
             elif "cmetadata" in data:
                 msg_type = "msg_cmetadata"
             elif "cdata" in data:
@@ -449,6 +465,10 @@ class MessageHandler:
                     if msg_type == "msg_config":
                         parsed = json.loads(data)
                         await self.parse_config_data(parsed=parsed)
+
+                    elif msg_type == "msg_groups":
+                        parsed = json.loads(data)
+                        await self.parse_groups_data(parsed=parsed)
 
                     elif msg_type == "msg_cmetadata":
                         parsed = json.loads(data)
@@ -483,6 +503,13 @@ class MessageHandler:
 
     @staticmethod
     async def parse_config_data(parsed):
+        # Window / door groups: the Tydom name of a window (e.g. a K-Line bay)
+        # whose opening detectors are its members (see parse_groups_data)
+        opening_groups.clear()
+        for group in parsed.get("groups", []):
+            if group.get("usage") in opening_usages and not group.get("group_all"):
+                opening_groups[str(group["id"])] = group.get("name") or str(group["id"])
+
         for i in parsed["endpoints"]:
             device_unique_id = str(i["id_endpoint"]) + "_" + str(i["id_device"])
 
@@ -490,10 +517,6 @@ class MessageHandler:
             # usage is not handled below, so entities never fall back to ids.
             if i.get("name"):
                 device_name[device_unique_id] = i["name"]
-                # The main endpoint of a Tydom device shares its id; its name
-                # is the one of the parent equipment (e.g. a K-Line bay window)
-                if str(i["id_endpoint"]) == str(i["id_device"]):
-                    device_parent_name[str(i["id_device"])] = i["name"]
 
             if i["last_usage"] not in supported_usages:
                 if device_unique_id not in reported_unsupported:
@@ -559,6 +582,17 @@ class MessageHandler:
                 device_endpoint[device_unique_id] = i["id_endpoint"]
 
         logger.debug("Configuration updated")
+
+    @staticmethod
+    async def parse_groups_data(parsed):
+        """Map each (device, endpoint) to the Tydom groups it belongs to."""
+        endpoint_groups.clear()
+        for group in parsed.get("groups", []):
+            for device in group.get("devices", []):
+                for endpoint in device.get("endpoints", []):
+                    key = str(device["id"]) + "_" + str(endpoint["id"])
+                    endpoint_groups.setdefault(key, []).append(str(group["id"]))
+        logger.debug("Groups updated")
 
     async def parse_cmeta_data(self, parsed):
         for i in parsed:
@@ -947,8 +981,6 @@ class MessageHandler:
                             attr_ukn["id"] = str(device_id) + "_" + str(endpoint_id)
                             attr_ukn["name"] = print_id
                             attr_ukn["device_type"] = "sensor"
-                            # openState only exists on openings: expose it too
-                            attr_ukn["opening_class"] = "window"
                             attr_ukn["element_name"] = element_name
                             attr_ukn[element_name] = element_value
                             self._add_element(attr_ukn, element_name)
@@ -1256,17 +1288,17 @@ class MessageHandler:
 
     async def _publish_sensors(self, attributes):
         """Publish one sensor per collected element, plus the opening state."""
-        # A window / door detector that is a child endpoint of another Tydom
-        # device (e.g. the opening sensor of a K-Line bay with its shutter) is
-        # attached to the parent equipment instead of its own HA device
-        device_id = str(attributes.get("device_id"))
-        if (
-            "opening_class" in attributes
-            and str(attributes.get("endpoint_id")) != device_id
-            and device_id in device_parent_name
-        ):
-            attributes["parent_id"] = device_id + "_" + device_id
-            attributes["parent_name"] = device_parent_name[device_id]
+        # An opening detector member of a Tydom window / door group (e.g. the
+        # "Ouvrant gauche" of a K-Line bay) is published on one HA device per
+        # window, named after the group; its entities keep their unique ids
+        # and are prefixed with the detector name.
+        if "opening_class" in attributes:
+            for group_id in endpoint_groups.get(str(attributes["id"]), []):
+                if group_id in opening_groups:
+                    attributes["parent_id"] = "tydom_window_group_" + group_id
+                    attributes["parent_name"] = opening_groups[group_id]
+                    attributes["member_name"] = str(attributes["name"])
+                    break
 
         for element_name in attributes.get("elements", [attributes["element_name"]]):
             new_sensor = Sensor(

@@ -53,7 +53,8 @@ def _clean_device_cache():
         "device_name",
         "device_type",
         "device_endpoint",
-        "device_parent_name",
+        "opening_groups",
+        "endpoint_groups",
     ):
         getattr(message_handler_module, cache).clear()
 
@@ -80,54 +81,137 @@ def test_kline_window_publishes_every_element_and_opening():
     assert published[f"binary_sensor/tydom/opening_tydom_{uid}/state"] == "ON"
 
 
-# K-Line: the opening detector is a child endpoint of the bay (parent device,
-# whose main endpoint is the shutter); it must join the parent HA device.
-def test_kline_child_detector_attached_to_parent_device():
-    mqtt = MagicMock()
-    handler = MessageHandler(b"", MagicMock(cmd_prefix=""), mqtt)
-    config = {
-        "endpoints": [
-            {
-                "id_endpoint": DEVICE_ID,
-                "id_device": DEVICE_ID,
-                "name": "Baie Salon",
-                "last_usage": "klineShutter",
-            },
-            {
-                "id_endpoint": 2,
-                "id_device": DEVICE_ID,
-                "name": "Detecteur",
-                "last_usage": "klineWindowSliding",
-            },
-        ]
-    }
-    endpoint = {
-        "id": 2,
+# K-Line bays: each opening detector is a standalone Tydom device named
+# "Ouvrant droit / gauche"; the window name comes from a windowFrench group
+# (/configs/file) whose members are listed in /groups/file.
+RIGHT, LEFT, SHUTTER = 11, 12, 13
+KLINE_CONFIG = {
+    "id_catalog": "x",
+    "groups": [
+        {"id": 500, "name": "Baie salon", "usage": "windowFrench", "group_all": False},
+        {"id": 900, "name": "TOTAL", "usage": "shutter", "group_all": True},
+    ],
+    "endpoints": [
+        {
+            "id_device": RIGHT,
+            "id_endpoint": RIGHT,
+            "name": "Ouvrant droit",
+            "first_usage": "window",
+            "last_usage": "windowFrench",
+        },
+        {
+            "id_device": LEFT,
+            "id_endpoint": LEFT,
+            "name": "Ouvrant gauche",
+            "first_usage": "window",
+            "last_usage": "windowFrench",
+        },
+        {
+            "id_device": SHUTTER,
+            "id_endpoint": SHUTTER,
+            "name": "Baie Salon",
+            "first_usage": "shutter",
+            "last_usage": "shutter",
+        },
+    ],
+}
+KLINE_GROUPS = {
+    "groups": [
+        {
+            "id": 500,
+            "areas": [],
+            "devices": [
+                {"id": RIGHT, "endpoints": [{"id": RIGHT}]},
+                {"id": LEFT, "endpoints": [{"id": LEFT}]},
+            ],
+        },
+        {
+            "id": 900,
+            "areas": [],
+            "devices": [
+                {"id": SHUTTER, "endpoints": [{"id": SHUTTER}]},
+            ],
+        },
+    ]
+}
+
+
+def _detector_data(device_id, open_state, validity="upToDate"):
+    return {
+        "id": device_id,
         "error": 0,
         "data": [
-            {"name": "openState", "validity": "upToDate", "value": "LOCKED"},
             {"name": "battDefect", "validity": "upToDate", "value": False},
+            {"name": "intrusionDetect", "validity": validity, "value": False},
+            {"name": "openState", "validity": validity, "value": open_state},
         ],
     }
-    asyncio.run(handler.parse_config_data(config))
-    asyncio.run(handler.parse_endpoint_data(endpoint, DEVICE_ID))
+
+
+def test_groups_file_response_is_routed():
+    handler = MessageHandler(b"", MagicMock(cmd_prefix=""), MagicMock())
+    asyncio.run(handler.parse_response(json.dumps(KLINE_CONFIG)))
+    asyncio.run(handler.parse_response(json.dumps(KLINE_GROUPS, separators=(",", ":"))))
+    assert message_handler_module.opening_groups == {"500": "Baie salon"}
+    assert message_handler_module.endpoint_groups[f"{RIGHT}_{RIGHT}"] == ["500"]
+
+
+def test_kline_detectors_published_on_their_window_group_device():
+    mqtt = MagicMock()
+    handler = MessageHandler(b"", MagicMock(cmd_prefix=""), mqtt)
+    asyncio.run(handler.parse_config_data(KLINE_CONFIG))
+    asyncio.run(handler.parse_groups_data(KLINE_GROUPS))
+    asyncio.run(handler.parse_endpoint_data(_detector_data(RIGHT, "UNLOCKED"), RIGHT))
+    asyncio.run(handler.parse_endpoint_data(_detector_data(LEFT, "LOCKED"), LEFT))
     published = _published(mqtt)
 
-    parent = f"{DEVICE_ID}_{DEVICE_ID}"
-    child = f"{DEVICE_ID}_2"
+    for member, name, state in (
+        (RIGHT, "Ouvrant droit", "ON"),
+        (LEFT, "Ouvrant gauche", "OFF"),
+    ):
+        uid = f"{member}_{member}"
+        opening = json.loads(
+            published[f"homeassistant/binary_sensor/tydom/opening_tydom_{uid}/config"]
+        )
+        open_state = json.loads(
+            published[f"homeassistant/sensor/tydom/openstate_tydom_{uid}/config"]
+        )
+        # One HA device per window, named after the Tydom group
+        for config_payload in (opening, open_state):
+            assert config_payload["device"]["identifiers"] == "tydom_window_group_500"
+            assert config_payload["device"]["name"] == "Baie salon"
+        # Unique ids unchanged, entities named after their detector
+        assert opening["unique_id"] == f"opening_tydom_{uid}"
+        assert opening["name"] == name
+        assert open_state["name"] == f"{name} openState"
+        assert published[f"binary_sensor/tydom/opening_tydom_{uid}/state"] == state
+
+
+def test_detector_outside_window_group_stays_standalone():
+    mqtt = MagicMock()
+    handler = MessageHandler(b"", MagicMock(cmd_prefix=""), mqtt)
+    asyncio.run(handler.parse_config_data(KLINE_CONFIG))
+    asyncio.run(handler.parse_endpoint_data(_detector_data(RIGHT, "LOCKED"), RIGHT))
     opening = json.loads(
-        published[f"homeassistant/binary_sensor/tydom/opening_tydom_{child}/config"]
+        _published(mqtt)[
+            f"homeassistant/binary_sensor/tydom/opening_tydom_{RIGHT}_{RIGHT}/config"
+        ]
     )
-    batt = json.loads(
-        published[f"homeassistant/binary_sensor/tydom/battdefect_tydom_{child}/config"]
+    assert opening["device"]["identifiers"] == f"{RIGHT}_{RIGHT}"
+    assert opening["name"] is None
+
+
+# An expired openState is not trusted: no opening state is published
+def test_expired_open_state_not_published():
+    mqtt = MagicMock()
+    handler = MessageHandler(b"", MagicMock(cmd_prefix=""), mqtt)
+    asyncio.run(handler.parse_config_data(KLINE_CONFIG))
+    asyncio.run(handler.parse_groups_data(KLINE_GROUPS))
+    asyncio.run(
+        handler.parse_endpoint_data(_detector_data(RIGHT, "LOCKED", "expired"), RIGHT)
     )
-    for config_payload in (opening, batt):
-        assert config_payload["device"]["identifiers"] == parent
-        assert config_payload["device"]["name"] == "Baie Salon"
-        assert "model" not in config_payload["device"]
-    # Named after its device class, next to the shutter (main feature)
-    assert "name" not in opening
-    assert opening["device_class"] == "window"
+    published = _published(mqtt)
+    assert not any("opening_tydom" in topic for topic in published)
 
 
 def test_door_opening_uses_door_class():
