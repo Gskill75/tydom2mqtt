@@ -244,7 +244,10 @@ class TydomClient:
         pass
 
     def add_poll_device_url(self, url):
-        self.poll_device_urls.append(url)
+        # /devices/cmeta is parsed again on every reconnect and config refresh:
+        # skip known URLs so the poll list does not grow on each pass.
+        if url not in self.poll_device_urls:
+            self.poll_device_urls.append(url)
 
     # Send Generic  message
     async def send_message(self, method, msg):
